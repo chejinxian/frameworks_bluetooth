@@ -24,6 +24,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 
 public class BtSock {
@@ -43,6 +45,7 @@ public class BtSock {
     private String mVar;
     public static final int MESSAGE_SOCK_LOGGING = 1;
     private BluetoothAdapter bluetoothAdapter;
+    private String mRemoteBdAddr;
 
     // It's used for Client or Server, for Server role, it means accepted socket
     private BluetoothSocket mSocket;
@@ -122,10 +125,7 @@ public class BtSock {
             return;
         }
 
-        // TODO:
-        stopAdvertising();
-        mSockRole = SOCK_ROLE_UNKNOWN;
-
+        resetSock();
     }
 
     public void connect(String bdAddr, String var) {
@@ -135,42 +135,49 @@ public class BtSock {
         }
 
         mSockRole = SOCK_ROLE_CLIENT;
+        mRemoteBdAddr = bdAddr;
+        mVar = var;
 
         BluetoothDevice device = bluetoothAdapter.getRemoteDevice(bdAddr);
-
-        // Connect remote device with different API, based on mType
         connectRemote(device, var);
 
-        // Start ConnectThread
         ConnectThread thread = new ConnectThread();
         thread.start();
         Log.i(TAG, "onClick: Connected Socket to" + bdAddr);
     }
 
     public void disconnect() {
-        if (null != mOutputStream) try {
-            mOutputStream.flush();
-            mOutputStream.close();
-        } catch (IOException e) {
-            e.printStackTrace();
+        if (mOutputStream != null) {
+            try {
+                mOutputStream.flush();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to flush output stream", e);
+            }
+            try {
+                mOutputStream.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close output stream", e);
+            }
+            mOutputStream = null;
         }
-        mOutputStream = null;
 
-        if (null != mInputStream) try {
-            mInputStream.close();
-        } catch (IOException e) {
-            e.printStackTrace();
+        if (mInputStream != null) {
+            try {
+                mInputStream.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close input stream", e);
+            }
+            mInputStream = null;
         }
-        mInputStream = null;
 
-        if (null != mSocket) try {
-            mSocket.getOutputStream().close();
-            mSocket.getInputStream().close();
-            mSocket.close();
-        } catch (IOException e) {
-            e.printStackTrace();
+        if (mSocket != null) {
+            try {
+                mSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close socket", e);
+            }
+            mSocket = null;
         }
-        mSocket = null;
 
         mSockRole = SOCK_ROLE_UNKNOWN;
     }
@@ -227,7 +234,7 @@ public class BtSock {
 
             //Log.d (TAG, "numOfChar = " + numOfChar);
 
-            msgToSend = "START:" + numOfChar;
+            msgToSend = "START:" + numOfChar + ";";
 
             // Delay the sending in another Thread, after receiving ACK from PEER
             mTxThread = new TxThread(num);
@@ -245,15 +252,14 @@ public class BtSock {
         public void run() {
             Log.d(TAG, "AcceptThread: started");
 
-            while (true) {
+            while (mServerSocket != null) {
                 try {
-                    // It's a blocking operation, so we shall do it in a background thread
                     Log.d(TAG, "before server.accept()");
                     mSocket = mServerSocket.accept();
                     Log.d(TAG, "after server.accept(), acceptSocket = " + mSocket);
                 } catch (IOException e) {
-                    e.printStackTrace();
-                    //return;
+                    Log.e(TAG, "AcceptThread: IOException", e);
+                    break;
                 }
 
                 if (null != mSocket) {
@@ -263,18 +269,14 @@ public class BtSock {
                         mInputStream = new BufferedInputStream(mSocket.getInputStream());
                         mOutputStream = new BufferedOutputStream(mSocket.getOutputStream());
 
-                        // Start receiving data
                         RxThread thread = new RxThread();
                         thread.start();
 
-                        // Only accept one connection!!!
-
-                        // Show logs on UI
                         String str = "Server: accepted one socket connection and started reading \r\n";
                         showLogs(str);
                         break;
                     } catch (IOException e) {
-                        e.printStackTrace();
+                        Log.e(TAG, "AcceptThread: Failed to get streams", e);
                     }
                 }
             }
@@ -286,9 +288,7 @@ public class BtSock {
         public void run() {
             Log.d(TAG, "ConnectThread: started");
 
-            // Create RFCOMM socket, as a Client
             try {
-                // It's a blocking operation, so we shall do it in background
                 Log.d(TAG, "onClick: before BluetoothSocket::connect");
                 mSocket.connect();
                 Log.d(TAG, "onClick: after BluetoothSocket::connect");
@@ -298,6 +298,8 @@ public class BtSock {
                 Log.e(TAG, "onClick: after BluetoothSocket::getInputStream, iStream = " + iStream);
                 if (null == iStream) {
                     Log.e(TAG, "Failed to getInputStream");
+                    resetSock();
+                    showLogs("Connection failed\r\n");
                     return;
                 }
                 mInputStream = new BufferedInputStream(iStream);
@@ -307,19 +309,21 @@ public class BtSock {
                 Log.e(TAG, "onClick: after BluetoothSocket::getOutputStream, iStream = " + oStream);
                 if (null == oStream) {
                     Log.e(TAG, "Failed to getOutputStream");
+                    resetSock();
+                    showLogs("Connection failed\r\n");
                     return;
                 }
                 mOutputStream = new BufferedOutputStream(oStream);
             } catch (IOException e) {
                 e.printStackTrace();
+                resetSock();
+                showLogs("Connection failed\r\n");
                 return;
             }
 
-            // Start receiving data
             RxThread thread = new RxThread();
             thread.start();
 
-            // Show logs on UI
             String str = "Client: Connected one server and started reading\r\n";
             showLogs(str);
         }
@@ -339,37 +343,40 @@ public class BtSock {
             Log.d(TAG, "RxThread: started");
 
             try {
-                while ((readSize = mInputStream.read(buffer, 0, buffer.length)) != -1) {
-                    //Log.d(TAG, "Received: readSize = " + readSize + ", buffer = " + buffer);
+                while (mInputStream != null && (readSize = mInputStream.read(buffer, 0, buffer.length)) != -1) {
                     readStr = new String(buffer, 0, readSize, "UTF-8");
 
                     if (readStr.startsWith("START:")) {
-                        //showLogs("Received \"START:\"\r\n");
                         if ((mSockTxState != SOCK_TX_STATE_IDLE) || (mSockRxState != SOCK_RX_STATE_IDLE)) {
                             showLogs("SPP is busy for sending now, ignore Rx Tput test request");
                         }
-                        totalSizeToReceive = Integer.parseInt(readStr.substring(6));
 
-                        // Write ACK to remote
-                        writeStr("START_ACK");
+                        String reg = ":(.*?)\\;";
+                        Pattern pattern = Pattern.compile(reg);
+                        Matcher m = pattern.matcher(readStr);
+                        if (m.find()) {
+                            totalSizeToReceive = Integer.parseInt(m.group(1));
 
-                        mSockRxState = SOCK_RX_STATE_RECEIVING;
-                        mTotalSize = totalSizeToReceive;
-                        mStartTime = System.currentTimeMillis();
-                        totalReceived = 0;
+                            writeStr("START_ACK");
 
-                        mReceivedStrBuf.setLength(0);
-                        continue;
+                            mSockRxState = SOCK_RX_STATE_RECEIVING;
+                            mTotalSize = totalSizeToReceive;
+                            mStartTime = System.currentTimeMillis();
+                            totalReceived = 0;
+
+                            if (mReceivedStrBuf != null) {
+                                mReceivedStrBuf.setLength(0);
+                            }
+                            continue;
+                        }
                     } else if (readStr.startsWith("START_ACK")) {
                         showLogs("Received \"START_ACK\"\r\n");
-                        if (mSockTxState == SOCK_TX_STATE_SENDING) {
-                            // Received ACK, continue to send data in another thread
+                        if (mSockTxState == SOCK_TX_STATE_SENDING && mTxThread != null) {
                             mTxThread.start();
                         }
                         continue;
                     } else if (readStr.startsWith("EOF")) {
                         showLogs("Received \"EOF\"\r\n");
-                        // Calculate Tput
                         mStopTime = System.currentTimeMillis();
                         duration = mStopTime - mStartTime;
 
@@ -378,15 +385,6 @@ public class BtSock {
                             str += ", Duration: " + duration + " ms, Average Tput = " + mTotalSize/duration + " kB/s";
                         str += "\r\n";
 
-                        // Check CRC
-                        long crcValue = Long.parseLong(readStr.substring(3));
-                        str += "CRC checking: Send CRC = " + mCrcValue + ", Receive CRC = " + crcValue + "\r\n";
-                        if (mCrcValue != crcValue) {
-                            Log.e(TAG, "Received wrongly!!!");
-                            mCycles = 0;
-                        }
-
-                        // Send message to UI
                         showLogs(str);
 
                         mStartTime = 0;
@@ -394,7 +392,6 @@ public class BtSock {
                         mTotalSize = 0;
                         mSockTxState = SOCK_TX_STATE_IDLE;
 
-                        // Restart Tx, for Stress Test
                         if (mCycles > 0) {
                             send(mStringToSend, mCycles - 1);
                         }
@@ -406,7 +403,9 @@ public class BtSock {
                             + ", totalSizeToReceive = " + totalSizeToReceive);
                     if (mSockRxState == SOCK_RX_STATE_RECEIVING) {
                         totalReceived += readSize;
-                        mReceivedStrBuf.append(readStr);
+                        if (mReceivedStrBuf != null) {
+                            mReceivedStrBuf.append(readStr);
+                        }
                         Log.d(TAG, "Updated totalReceived = " + totalReceived + ", readSize = " + readSize);
 
                         if (totalReceived >= totalSizeToReceive) {
@@ -418,15 +417,9 @@ public class BtSock {
                                 str += ", Duration: " + duration + " ms, Average Tput = " + mTotalSize/duration + " kB/s";
                             str += "\r\n";
 
-                            //showLogs(str);
+                            showLogs(str);
 
-                            // Calculate CRC
-                            CRC32 crc = new CRC32();
-                            crc.update(mReceivedStrBuf.toString().getBytes());
-                            long crcValue = crc.getValue();
-
-                            // Tell remote to stop sending and calculate Tput on remote side
-                            writeStr("EOF" + crcValue);
+                            writeStr("EOF");
 
                             mStartTime = 0;
                             mStopTime = 0;
@@ -435,17 +428,16 @@ public class BtSock {
                         }
                     } else {
                         str = "Received " + String.valueOf(readSize) + " Bytes: " + readStr +"\r\n";
-
-                        // Send message to UI
-                        //showLogs(str);
+                        showLogs(str);
                     }
                 }
             } catch (IOException e) {
-                e.printStackTrace();
-                //return;
+                Log.e(TAG, "RxThread: IOException", e);
+            } catch (Exception e) {
+                Log.e(TAG, "RxThread: Exception", e);
             }
 
-            if (mSockRole == SOCK_ROLE_SERVER) {
+            if (mSockRole == SOCK_ROLE_SERVER && mVar != null) {
                 showLogs("Socket unexpectedly disconnected, restart Accept Thread again");
                 disconnect();
                 register(mVar);
@@ -474,7 +466,7 @@ public class BtSock {
 
             // Building string to be sent:
             long testTimeStart = System.currentTimeMillis();
-            showLogs("Preparing data to be sent ...\r\n");
+//            showLogs("Preparing data to be sent ...\r\n");
 
             /* Option#1: low efficiency!
             for (int i = 0; i <= mNumToSend; i++) {
@@ -545,13 +537,17 @@ public class BtSock {
     }
 
     private void writeStr(String msgToSend) {
+        if (mOutputStream == null) {
+            Log.e(TAG, "writeStr: mOutputStream is null");
+            return;
+        }
         try {
             mOutputStream.write(msgToSend.getBytes());
-            //mOutputStream.write('\r');
-            //mOutputStream.write('\n');
             mOutputStream.flush();
         } catch (IOException e) {
-            e.printStackTrace();
+            Log.e(TAG, "writeStr: IOException", e);
+        } catch (Exception e) {
+            Log.e(TAG, "writeStr: Exception", e);
         }
     }
 
@@ -694,8 +690,83 @@ public class BtSock {
 
     private void stopAdvertising() {
         Log.d(TAG, "stopAdvertising: enter");
+        try {
+            if (bluetoothAdapter != null) {
+                BluetoothLeAdvertiser btAdvertiser = bluetoothAdapter.getBluetoothLeAdvertiser();
+                if (btAdvertiser != null) {
+                    btAdvertiser.stopAdvertising(mAdvertiseCallback);
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "stopAdvertising: Exception", e);
+        }
+    }
 
-        BluetoothLeAdvertiser btAdvertiser = bluetoothAdapter.getBluetoothLeAdvertiser();
-        btAdvertiser.stopAdvertising(mAdvertiseCallback);
+    private void resetSock() {
+        Log.i(TAG,"reset bt sock");
+
+        // Reset all state variables
+        mSockRxState = SOCK_RX_STATE_IDLE;
+        mSockTxState = SOCK_TX_STATE_IDLE;
+        mCycles = 0;
+        mStringToSend = null;
+        mCrcValue = 0;
+        if (mReceivedStrBuf != null) {
+            mReceivedStrBuf.setLength(0);
+        }
+        mTotalSize = 0;
+        mStartTime = 0;
+        mStopTime = 0;
+        mRemoteBdAddr = null;
+        mVar = null;
+        mTxThread = null;
+
+        // Close streams
+        if (mInputStream != null) {
+            try {
+                mInputStream.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close input stream", e);
+            }
+            mInputStream = null;
+        }
+
+        if (mOutputStream != null) {
+            try {
+                mOutputStream.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close output stream", e);
+            }
+            mOutputStream = null;
+        }
+
+        // Close sockets
+        if (mSocket != null) {
+            try {
+                mSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close socket", e);
+            }
+            mSocket = null;
+        }
+
+        if (mServerSocket != null) {
+            try {
+                mServerSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close server socket", e);
+            }
+            mServerSocket = null;
+
+            if (SOCK_TYPE_L2CAP_BLE_INSECURE == mType || SOCK_TYPE_L2CAP_BLE_SECURE == mType) {
+                try {
+                    stopAdvertising();
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to stop advertising", e);
+                }
+            }
+        }
+        
+        mSockRole = SOCK_ROLE_UNKNOWN;
     }
 }
