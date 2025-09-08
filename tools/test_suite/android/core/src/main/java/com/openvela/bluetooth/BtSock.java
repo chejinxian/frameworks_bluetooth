@@ -24,6 +24,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 
 public class BtSock {
@@ -122,10 +124,7 @@ public class BtSock {
             return;
         }
 
-        // TODO:
-        stopAdvertising();
-        mSockRole = SOCK_ROLE_UNKNOWN;
-
+        resetSock();
     }
 
     public void connect(String bdAddr, String var) {
@@ -227,7 +226,7 @@ public class BtSock {
 
             //Log.d (TAG, "numOfChar = " + numOfChar);
 
-            msgToSend = "START:" + numOfChar;
+            msgToSend = "START:" + numOfChar + ";";
 
             // Delay the sending in another Thread, after receiving ACK from PEER
             mTxThread = new TxThread(num);
@@ -298,6 +297,7 @@ public class BtSock {
                 Log.e(TAG, "onClick: after BluetoothSocket::getInputStream, iStream = " + iStream);
                 if (null == iStream) {
                     Log.e(TAG, "Failed to getInputStream");
+                    resetSock();
                     return;
                 }
                 mInputStream = new BufferedInputStream(iStream);
@@ -307,11 +307,13 @@ public class BtSock {
                 Log.e(TAG, "onClick: after BluetoothSocket::getOutputStream, iStream = " + oStream);
                 if (null == oStream) {
                     Log.e(TAG, "Failed to getOutputStream");
+                    resetSock();
                     return;
                 }
                 mOutputStream = new BufferedOutputStream(oStream);
             } catch (IOException e) {
                 e.printStackTrace();
+                resetSock();
                 return;
             }
 
@@ -348,18 +350,24 @@ public class BtSock {
                         if ((mSockTxState != SOCK_TX_STATE_IDLE) || (mSockRxState != SOCK_RX_STATE_IDLE)) {
                             showLogs("SPP is busy for sending now, ignore Rx Tput test request");
                         }
-                        totalSizeToReceive = Integer.parseInt(readStr.substring(6));
 
-                        // Write ACK to remote
-                        writeStr("START_ACK");
+                        String reg = ":(.*?)\\;";
+                        Pattern pattern = Pattern.compile(reg);
+                        Matcher m = pattern.matcher(readStr);
+                        if (m.find()) {
+                            totalSizeToReceive = Integer.parseInt(m.group(1));
 
-                        mSockRxState = SOCK_RX_STATE_RECEIVING;
-                        mTotalSize = totalSizeToReceive;
-                        mStartTime = System.currentTimeMillis();
-                        totalReceived = 0;
+                            // Write ACK to remote
+                            writeStr("START_ACK");
 
-                        mReceivedStrBuf.setLength(0);
-                        continue;
+                            mSockRxState = SOCK_RX_STATE_RECEIVING;
+                            mTotalSize = totalSizeToReceive;
+                            mStartTime = System.currentTimeMillis();
+                            totalReceived = 0;
+
+                            mReceivedStrBuf.setLength(0);
+                            continue;
+                        }
                     } else if (readStr.startsWith("START_ACK")) {
                         showLogs("Received \"START_ACK\"\r\n");
                         if (mSockTxState == SOCK_TX_STATE_SENDING) {
@@ -379,12 +387,12 @@ public class BtSock {
                         str += "\r\n";
 
                         // Check CRC
-                        long crcValue = Long.parseLong(readStr.substring(3));
-                        str += "CRC checking: Send CRC = " + mCrcValue + ", Receive CRC = " + crcValue + "\r\n";
-                        if (mCrcValue != crcValue) {
-                            Log.e(TAG, "Received wrongly!!!");
-                            mCycles = 0;
-                        }
+//                        long crcValue = Long.parseLong(readStr.substring(3));
+//                        str += "CRC checking: Send CRC = " + mCrcValue + ", Receive CRC = " + crcValue + "\r\n";
+//                        if (mCrcValue != crcValue) {
+//                            Log.e(TAG, "Received wrongly!!!");
+//                            mCycles = 0;
+//                        }
 
                         // Send message to UI
                         showLogs(str);
@@ -418,15 +426,16 @@ public class BtSock {
                                 str += ", Duration: " + duration + " ms, Average Tput = " + mTotalSize/duration + " kB/s";
                             str += "\r\n";
 
-                            //showLogs(str);
+                            showLogs(str);
 
                             // Calculate CRC
-                            CRC32 crc = new CRC32();
-                            crc.update(mReceivedStrBuf.toString().getBytes());
-                            long crcValue = crc.getValue();
-
-                            // Tell remote to stop sending and calculate Tput on remote side
-                            writeStr("EOF" + crcValue);
+//                            CRC32 crc = new CRC32();
+//                            crc.update(mReceivedStrBuf.toString().getBytes());
+//                            long crcValue = crc.getValue();
+//
+//                            // Tell remote to stop sending and calculate Tput on remote side
+//                            writeStr("EOF" + crcValue);
+                            writeStr("EOF");
 
                             mStartTime = 0;
                             mStopTime = 0;
@@ -437,7 +446,7 @@ public class BtSock {
                         str = "Received " + String.valueOf(readSize) + " Bytes: " + readStr +"\r\n";
 
                         // Send message to UI
-                        //showLogs(str);
+                        showLogs(str);
                     }
                 }
             } catch (IOException e) {
@@ -474,7 +483,7 @@ public class BtSock {
 
             // Building string to be sent:
             long testTimeStart = System.currentTimeMillis();
-            showLogs("Preparing data to be sent ...\r\n");
+//            showLogs("Preparing data to be sent ...\r\n");
 
             /* Option#1: low efficiency!
             for (int i = 0; i <= mNumToSend; i++) {
@@ -697,5 +706,62 @@ public class BtSock {
 
         BluetoothLeAdvertiser btAdvertiser = bluetoothAdapter.getBluetoothLeAdvertiser();
         btAdvertiser.stopAdvertising(mAdvertiseCallback);
+    }
+
+    private void resetSock() {
+        Log.i(TAG,"reset bt sock");
+
+        // reset status
+        mSockRole = SOCK_ROLE_UNKNOWN;
+        mSockRxState = SOCK_RX_STATE_IDLE;
+        mSockTxState = SOCK_TX_STATE_IDLE;
+        mCycles = 0;
+        mStringToSend = null;
+        mReceivedStrBuf.setLength(0);
+        mTotalSize = 0;
+        mStartTime = 0;
+        mStopTime = 0;
+
+        // close Stream
+        if (mInputStream != null) {
+            try {
+                mInputStream.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close input stream", e);
+            }
+            mInputStream = null;
+        }
+
+        if (mOutputStream != null) {
+            try {
+                mOutputStream.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close output stream", e);
+            }
+            mOutputStream = null;
+        }
+
+        // close socket
+        if (mSocket != null) {
+            try {
+                mSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close socket", e);
+            }
+            mSocket = null;
+        }
+
+        if (mServerSocket != null) {
+            try {
+                mServerSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close server socket", e);
+            }
+            mServerSocket = null;
+
+            if (SOCK_TYPE_L2CAP_BLE_INSECURE == mType || SOCK_TYPE_L2CAP_BLE_SECURE == mType) {
+                stopAdvertising();
+            }
+        }
     }
 }
