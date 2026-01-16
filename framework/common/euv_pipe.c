@@ -203,6 +203,11 @@ int euv_pipe_read_start(euv_pipe_t* handle, uint16_t read_size, euv_read_cb read
     euv_read_t* reader;
     int ret;
 
+    if (uv_is_closing((uv_handle_t*)&handle->cli_pipe)) {
+        BT_LOGE("%s, handle %p is closing", __func__, handle);
+        return 0;
+    }
+
     if (uv_is_active((uv_handle_t*)&handle->cli_pipe)) {
         BT_LOGE("%s, client is active", __func__);
         return 0;
@@ -236,6 +241,12 @@ int euv_pipe_read_stop(euv_pipe_t* handle)
         return -EINVAL;
     }
 
+    if (uv_is_closing((uv_handle_t*)&handle->cli_pipe)) {
+        /* When closing a euv_pipe_t instance, euv_pipe_read_stop shall be called before assigning cli_pipe.data to handle */
+        BT_LOGE("%s, handle %p is closing", __func__, handle);
+        return 0;
+    }
+
     if (handle->cli_pipe.data) {
         free(handle->cli_pipe.data);
         handle->cli_pipe.data = NULL;
@@ -243,11 +254,6 @@ int euv_pipe_read_stop(euv_pipe_t* handle)
 
     if (!uv_is_active((uv_handle_t*)&handle->cli_pipe)) {
         BT_LOGW("%s, cli_pipe is inactive", __func__);
-        return 0;
-    }
-
-    if (uv_is_closing((uv_handle_t*)&handle->cli_pipe)) {
-        BT_LOGE("%s, uv_is_closing", __func__);
         return 0;
     }
 
