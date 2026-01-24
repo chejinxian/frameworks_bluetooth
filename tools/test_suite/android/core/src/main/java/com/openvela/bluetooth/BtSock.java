@@ -546,10 +546,14 @@ public class BtSock {
                 Log.e(TAG, "RxThread: Exception", e);
             }
 
+            showLogs("Connection closed\r\n");
+            
             if (mSockRole == SOCK_ROLE_SERVER && mVar != null) {
-                showLogs("Socket unexpectedly disconnected, restart Accept Thread again");
+                showLogs("Restart Accept Thread\r\n");
                 disconnect();
                 register(mVar);
+            } else if (mSockRole == SOCK_ROLE_CLIENT) {
+                disconnect();
             }
         }
     }
