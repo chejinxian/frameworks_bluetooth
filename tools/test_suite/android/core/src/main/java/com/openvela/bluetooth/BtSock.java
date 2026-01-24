@@ -61,6 +61,9 @@ public class BtSock {
     private Handler mHandler;
     // Thread to sending data
     private TxThread mTxThread;
+    private volatile boolean mStreamRunning = false;
+    private static final int MAX_STREAM_FREQ = 100;
+    private static final int MAX_STREAM_LEN = 4096;
 
     // For Tput calculation
     private int mTotalSize;
@@ -183,8 +186,30 @@ public class BtSock {
     }
 
     public void send(String msgToSend, int cycles) {
+        // Check for Stream Stop command
+        if (msgToSend.equals("StreamStop")) {
+            stopStreamMode();
+            return;
+        }
+
+        // Check for Stream command
+        if (msgToSend.startsWith("Stream ")) {
+            String[] parts = msgToSend.split(" ");
+            if (parts.length >= 3) {
+                try {
+                    int len = Integer.parseInt(parts[1]);
+                    int freq = Integer.parseInt(parts[2]);
+                    startStreamMode(len, freq);
+                    return;
+                } catch (NumberFormatException e) {
+                    showLogs("Invalid Stream command format\r\n");
+                    return;
+                }
+            }
+        }
+
         // TODO: Check whether it's busy now
-        if ((mSockTxState != SOCK_TX_STATE_IDLE) || (mSockRxState != SOCK_RX_STATE_IDLE)) {
+        if ((mSockTxState != SOCK_TX_STATE_IDLE) || (mSockRxState != SOCK_RX_STATE_IDLE) || mStreamRunning) {
             showLogs("Unexpected send: it's busy now, mSockTxState = " + mSockTxState + ", mSockRxState = " + mSockRxState);
             return;
         }
@@ -245,6 +270,90 @@ public class BtSock {
         // Show logs on UI
         String str = "Sent: size = " + msgToSend.length() + " Bytes: \"" + msgToSend + "\"\r\n";
         showLogs(str);
+    }
+
+    private void startStreamMode(int len, int freq) {
+        if (mStreamRunning) {
+            showLogs("Stream mode already running\r\n");
+            return;
+        }
+        if (mSockTxState != SOCK_TX_STATE_IDLE || mSockRxState != SOCK_RX_STATE_IDLE) {
+            showLogs("Cannot start stream: other operation in progress\r\n");
+            return;
+        }
+        if ((null == mSocket) || (null == mOutputStream)) {
+            showLogs("Socket not connected\r\n");
+            return;
+        }
+        if (len <= 0 || len > MAX_STREAM_LEN) {
+            showLogs("Invalid len, must be 1-" + MAX_STREAM_LEN + "\r\n");
+            return;
+        }
+        if (freq <= 0 || freq > MAX_STREAM_FREQ) {
+            showLogs("Invalid freq, must be 1-" + MAX_STREAM_FREQ + "\r\n");
+            return;
+        }
+        
+        mStreamRunning = true;
+        mSockTxState = SOCK_TX_STATE_SENDING;
+        final byte[] data = new byte[len];
+        for (int i = 0; i < len; i++) {
+            data[i] = (byte) (i % 256);
+        }
+        final long targetInterval = 1000 / freq;
+        
+        mHandler.post(new Runnable() {
+            private long count = 0;
+            private long lastSendTime = System.currentTimeMillis();
+            
+            @Override
+            public void run() {
+                if (!mStreamRunning || mOutputStream == null) {
+                    mStreamRunning = false;
+                    mSockTxState = SOCK_TX_STATE_IDLE;
+                    showLogs("Stream ended, sent " + count + " packets\r\n");
+                    return;
+                }
+                try {
+                    long startTime = System.currentTimeMillis();
+                    mOutputStream.write(data);
+                    count++;
+                    
+                    long writeTime = System.currentTimeMillis() - startTime;
+                    long actualInterval = startTime - lastSendTime;
+                    lastSendTime = startTime;
+                    
+                    long nextDelay;
+                    if (writeTime >= targetInterval) {
+                        nextDelay = 0;
+                    } else {
+                        nextDelay = targetInterval - writeTime;
+                        if (actualInterval > targetInterval * 3) {
+                            nextDelay = 0;
+                        }
+                    }
+                    
+                    if (nextDelay == 0) {
+                        mHandler.post(this);
+                    } else {
+                        mHandler.postDelayed(this, nextDelay);
+                    }
+                } catch (IOException e) {
+                    mStreamRunning = false;
+                    mSockTxState = SOCK_TX_STATE_IDLE;
+                    showLogs("Stream error: " + e.getMessage() + "\r\n");
+                }
+            }
+        });
+        showLogs("Stream started: len=" + len + ", target freq=" + freq + " (auto-adjusted)\r\n");
+    }
+
+    private void stopStreamMode() {
+        if (mStreamRunning) {
+            mStreamRunning = false;
+            mSockTxState = SOCK_TX_STATE_IDLE;
+            showLogs("Stream stopped\r\n");
+        }
     }
 
     // AcceptThread is used by Server to listen a connection from other clients
@@ -704,6 +813,9 @@ public class BtSock {
 
     private void resetSock() {
         Log.i(TAG,"reset bt sock");
+
+        // Stop stream mode if running
+        stopStreamMode();
 
         // Reset all state variables
         mSockRxState = SOCK_RX_STATE_IDLE;
